@@ -1,0 +1,69 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 33861d1cb45a9e849bfad35b62691d00, type: 3}
+  m_Name: GameSettings
+  m_EditorClassIdentifier: 
+  Settings:
+    InactivityBeforeHint: 2
+    VisualSettings:
+      FallSpeed: 10
+      FallAccelerationCurve:
+        serializedVersion: 2
+        m_Curve: []
+        m_PreInfinity: 2
+        m_PostInfinity: 2
+        m_RotationOrder: 4
+      BounceCurve:
+        serializedVersion: 2
+        m_Curve: []
+        m_PreInfinity: 2
+        m_PostInfinity: 2
+        m_RotationOrder: 4
+      SquishCurve:
+        serializedVersion: 2
+        m_Curve: []
+        m_PreInfinity: 2
+        m_PostInfinity: 2
+        m_RotationOrder: 4
+      MatchFlyCurve:
+        serializedVersion: 2
+        m_Curve: []
+        m_PreInfinity: 2
+        m_PostInfinity: 2
+        m_RotationOrder: 4
+      CoinFlyCurve:
+        serializedVersion: 2
+        m_Curve: []
+        m_PreInfinity: 2
+        m_PostInfinity: 2
+        m_RotationOrder: 4
+      BonusModePrefab: {fileID: 0}
+      HintPrefab: {fileID: 0}
+      CoinVFX: {fileID: 0}
+      WinEffect: {fileID: 0}
+      LoseEffect: {fileID: 0}
+    BonusSettings:
+      Bonuses: []
+    ShopSettings:
+      Items: []
+    SoundSettings:
+      Mixer: {fileID: 0}
+      SFXSourcePrefab: {fileID: 0}
+      MusicSourcePrefab: {fileID: 0}
+      MenuSound: {fileID: 0}
+      SwipSound: {fileID: 0}
+      FallSound: {fileID: 0}
+      CoinSound: {fileID: 0}
+      WinVoice: {fileID: 0}
+      LooseVoice: {fileID: 0}
+      WinSound: {fileID: 0}
+      LooseSound: {fileID: 0}
