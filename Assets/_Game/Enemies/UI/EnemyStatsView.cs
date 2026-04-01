@@ -35,15 +35,24 @@ namespace Match3
                 RefreshHealth(0);
             }
 
-            if (intentView != null)
-                intentView.SetIntent("?");
+        
         }
+        
+        
 
         private void HandleDied()
         {
             
         }
 
+        public void Update()
+        {
+            if (intentView == null) return;
+            
+            if(enemyDefinition.GetCurrentAction() is IEnemyActionDisplayString displayString)
+                intentView.SetIntent(displayString.GetActionString());
+        }
+        
         private void OnDestroy()
         {
             if (enemyDefinition?.Health != null)

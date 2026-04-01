@@ -8,6 +8,14 @@ namespace Match3
     /// Данные уровня: боевая конфигурация (HP игрока, префабы врагов), визуал, музыка.
     /// При Awake() уведомляет GameManager о начале уровня.
     /// </summary>
+
+    [Serializable]
+    public class EnemyLevelPoint
+    {
+        public Transform point;
+        public EnemyDefinition EnemyDefinition;
+    }
+    
     [DefaultExecutionOrder(12000)]
     public class LevelData : MonoBehaviour
     {
@@ -17,7 +25,7 @@ namespace Match3
 
         [Header("Battle")]
         public int PlayerMaxHealth = 100;
-        public EnemyDefinition[] EnemyPrefabs;
+        public EnemyLevelPoint[] EnemyLevelPoints;
 
         [Header("Visuals")]
         public float BorderMargin = 0.3f;
@@ -61,11 +69,13 @@ namespace Match3
                 PlayerHealth = new Health(PlayerMaxHealth)
             };
 
-            if (EnemyPrefabs != null)
+            BattleState.Energy = BattleState.MaxEnergy;
+
+            if (EnemyLevelPoints != null)
             {
-                foreach (var enemyPrefab in EnemyPrefabs)
+                foreach (var enemyLevel in EnemyLevelPoints)
                 {
-                    var enemyInstance = Instantiate(enemyPrefab);
+                    var enemyInstance = Instantiate(enemyLevel.EnemyDefinition, enemyLevel.point);
                     enemyInstance.InitBattle();
                     BattleState.Enemies.Add(enemyInstance);
                     spawnedEnemies.Add(enemyInstance);
@@ -95,12 +105,11 @@ namespace Match3
 
         public void PlayerMoved()
         {
-            BattleProcessor.OnPlayerMoved();
+            StartCoroutine(BattleProcessor.OnPlayerMoved());
         }
 
         public void OnBoardSettled()
         {
-            BattleProcessor.ProcessEnemyTurn();
             OnBattleStateChanged?.Invoke(BattleState);
 
             var result = BattleProcessor.CheckBattleEnd();

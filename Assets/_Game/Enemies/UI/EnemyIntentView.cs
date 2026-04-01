@@ -1,3 +1,4 @@
+using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
 
@@ -8,11 +9,11 @@ namespace Match3
     /// </summary>
     public class EnemyIntentView : MonoBehaviour
     {
-        [SerializeField] private Text textLabel;
+        [SerializeField] private TMP_Text textLabel;
 
         private void Awake()
         {
-            if (textLabel == null) textLabel = GetComponentInChildren<Text>();
+            if (textLabel == null) textLabel = GetComponentInChildren<TMP_Text>();
         }
 
         public void SetIntent(string text)

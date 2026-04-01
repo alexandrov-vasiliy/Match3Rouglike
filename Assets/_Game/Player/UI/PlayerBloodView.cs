@@ -18,7 +18,7 @@ namespace Match3
         public void SetBlood(int value)
         {
             if (textLabel != null)
-                textLabel.text = $"💧 {value}";
+                textLabel.text = $"Blood {value}";
         }
     }
 }

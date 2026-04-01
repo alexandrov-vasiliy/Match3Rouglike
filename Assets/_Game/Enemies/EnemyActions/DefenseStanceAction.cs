@@ -1,15 +1,11 @@
+using System.Collections;
 using UnityEngine;
 
 namespace Match3
 {
-    [System.Serializable]
-    public class DefenseStanceAction : IEnemyAction
+    public class DefenseStanceAction :IEnemyAction, IEnemyActionDisplayString
     {
-        public int Interval = 4;
         public int ArmorAmount = 3;
-
-        [SerializeField]
-        private int moveCounter;
 
         private EnemyDefinition owner;
 
@@ -20,20 +16,22 @@ namespace Match3
 
         public void OnPlayerMoved(BattleState state)
         {
-            moveCounter++;
         }
 
-        public bool TryExecute(BattleState state)
+        public IEnumerator TryExecute(BattleState state)
         {
-            if (moveCounter < Interval)
-                return false;
-
-            moveCounter = 0;
 
             if (owner != null && owner.Health != null)
                 owner.Health.AddArmor(ArmorAmount);
 
-            return true;
+            
+            Debug.Log("Armor action");
+            yield return new WaitForSeconds(1);
+        }
+
+        public string GetActionString()
+        {
+            return "Armor";
         }
     }
 }

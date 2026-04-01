@@ -18,7 +18,7 @@ namespace Match3
         public void SetArmor(int value)
         {
             if (textLabel != null)
-                textLabel.text = value > 0 ? $"🛡 {value}" : "";
+                textLabel.text = value > 0 ? $"Armor: {value}" : "";
         }
     }
 }

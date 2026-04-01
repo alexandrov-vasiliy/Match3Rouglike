@@ -2,7 +2,9 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using DG.Tweening;
 using Match3;
+using NaughtyAttributes;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using UnityEngine.Tilemaps;
@@ -14,10 +16,10 @@ namespace Match3
     [DefaultExecutionOrder(-9999)]
     public class Board : MonoBehaviour
     {
-        //Board hold a list of BoardAction that get ticked on its Update. Useful for Bonus to add timed effects and the like.
+        // Доска хранит список BoardAction, которые обрабатываются в Update. Удобно для бонусов с таймерами и т.п.
         public interface IBoardAction
         {
-            //Return true if should continue, false if the action done 
+            // true — продолжать тикать; false — действие завершено
             bool Tick();
         }
 
@@ -42,7 +44,7 @@ namespace Match3
 
         private bool m_BoardWasInit = false;
         private bool m_InputEnabled = true;
-        private bool m_FinalStretch = false;//set when either reach goal or no move left. When board settle, trigger the end
+        private bool m_FinalStretch = false; // цель достигнута или ходов не осталось; при стабилизации доски — конец уровня
         
         private Grid m_Grid;
         private BoundsInt m_BoundsInt;
@@ -62,9 +64,23 @@ namespace Match3
         private int m_PickedSwap;
         private float m_SinceLastHint = 0.0f;
 
-        //this is set by some bonus like the rocket to stop gem moving in/out of the rocket path. Once rocket is done
-        //it unfreeze to let everything fall again. Increment at each lock, decrement on unlock so multiple lock are
-        //possible
+        private const int MaxBoardReshuffleAttempts = 64;
+        private const int MaxNoMatchReshuffleBuildAttempts = 96;
+
+        private bool m_ReshuffleAnimationInProgress = false;
+
+        private readonly HashSet<int> m_ScratchGemTypesForReshuffle = new HashSet<int>();
+
+        private const float ReshuffleStaggerSeconds = 0.028f;
+        private const float ReshuffleLiftPhaseSeconds = 0.2f;
+        private const float ReshuffleFlyPhaseSeconds = 0.38f;
+        private const float ReshuffleArcHeightMin = 0.38f;
+        private const float ReshuffleArcHeightFactor = 0.32f;
+        private const float ReshuffleArcHeightMax = 1.05f;
+        private const float ReshuffleScalePulse = 1.07f;
+
+        // Некоторые бонусы (например ракета) блокируют движение гемов в/из зоны пути. После окончания эффекта —
+        // разблокировка. Плюс при каждой блокировке, минус при снятии; так можно вкладывать несколько блокировок.
         private int m_FreezeMoveLock = 0;
 
         private List<Vector3Int> m_EmptyCells = new();
@@ -77,7 +93,7 @@ namespace Match3
         private bool m_SwipeQueued;
         private Vector3Int m_StartSwipe;
         private Vector3Int m_EndSwipe;
-        //private bool m_IsHoldingTouch;
+        // private bool m_IsHoldingTouch;
 
         private float m_LastClickTime = 0.0f;
 
@@ -98,10 +114,10 @@ namespace Match3
         private SwapStage m_SwapStage = SwapStage.None;
         private (Vector3Int, Vector3Int) m_SwappingCells;
 
-        //---- interaction
+        // ---- ввод
         public Vector3 m_StartClickPosition;
 
-        // Start is called before the first frame update
+        // Awake вызывается до первого кадра
         void Awake()
         {
             s_Instance = this;
@@ -111,8 +127,8 @@ namespace Match3
         private void Start()
         {
 #if !UNITY_EDITOR
-        //In a built player, the tilemap data are not refreshed, and the edit time one are the one used. We need to
-        //to refresh it as otherwise the edit time preview sprite would still be used.
+            // В билде данные тайлмапа не обновляются сами — остаются как в редакторе. Нужно принудительно обновить,
+            // иначе останется спрайт превью из режима редактирования.
         var tilemaps = m_Grid.GetComponentsInChildren<Tilemap>();
         foreach (var tilemap in tilemaps)
         {
@@ -123,8 +139,9 @@ namespace Match3
 
         private void OnDestroy()
         {
-            //order of deletion when quitting the game can make the manager be destroyed first so we make sure it's not
-            //shutting down, otherwise in editor, calling GameManager.Instance would create a new game manager.
+            DOTween.Kill(this);
+            // При выходе из игры менеджер может уничтожиться раньше — проверяем, что приложение не завершается,
+            // иначе в редакторе обращение к GameManager.Instance создаст новый экземпляр.
             if(!GameManager.IsShuttingDown()) GameManager.Instance.PoolSystem.Clean();
         }
 
@@ -172,7 +189,7 @@ namespace Match3
             }
 #endif
             
-            //fill a lookup of gem type to gem
+            // словарь: тип гема → префаб гема
             m_GemLookup = new Dictionary<int, Gem>();
             foreach (var gem in ExistingGems)
             {
@@ -180,11 +197,16 @@ namespace Match3
             }
 
             GenerateBoard();
-            FindAllPossibleMatch();
-        
+            StartCoroutine(InitAfterGenerateRoutine());
+        }
+
+        IEnumerator InitAfterGenerateRoutine()
+        {
+            yield return RunReshufflePasses(forceReshuffleEvenIfMovesExist: false);
+
             m_HintIndicator = Instantiate(GameManager.Instance.Settings.VisualSettings.HintPrefab);
             m_HintIndicator.SetActive(false);
-        
+
             m_BoardWasInit = true;
 
             if (GemHoldPrefab != null)
@@ -200,7 +222,7 @@ namespace Match3
             }
 
             ToggleInput(false);
-            //we wait couple of frames before fading in, as UI was just init yet so animation would not play
+            // пара кадров до FadeIn, чтобы UI успел инициализироваться и анимация проигралась
             StartCoroutine(WaitToFadeIn());
         }
 
@@ -211,10 +233,10 @@ namespace Match3
             UIHandler.Instance.FadeIn(() => { ToggleInput(true); });
         }
 
-        //Called by Gem Placer to create a placement cell
+        // Вызывается Gem Placer при создании ячейки размещения
         public static void RegisterCell(Vector3Int cellPosition, Gem startingGem = null)
         {
-            //Not super happy with that, but Startup is called before all Awake....
+            // Костыль: Startup может выполниться раньше всех Awake...
             if (s_Instance == null)
             {
                 s_Instance = GameObject.Find("Grid").GetComponent<Board>();
@@ -240,7 +262,7 @@ namespace Match3
 
         public static void ChangeLock(Vector3Int cellPosition, bool lockState)
         {
-            //Not super happy with that, but Startup is called before all Awake....
+            // Костыль: Startup может выполниться раньше всех Awake...
             if (s_Instance == null)
             {
                 s_Instance = GameObject.Find("Grid").GetComponent<Board>();
@@ -296,7 +318,7 @@ namespace Match3
 
         public static void RegisterSpawner(Vector3Int cell)
         {
-            //Not super happy with that, but Startup is called before all Awake....
+            // Костыль: Startup может выполниться раньше всех Awake...
             if (s_Instance == null)
             {
                 s_Instance = GameObject.Find("Grid").GetComponent<Board>();
@@ -306,7 +328,7 @@ namespace Match3
             s_Instance.SpawnerPosition.Add(cell);
         }
 
-        //generate a gem in every cell, making sure we don't have any match 
+        // Создаёт гем в каждой пустой ячейке так, чтобы не было готового матча
         void GenerateBoard()
         {
             m_BoundsInt = new BoundsInt();
@@ -341,128 +363,96 @@ namespace Match3
                         continue;
                 
                     var availableGems = m_GemLookup.Keys.ToList();
-
-                    int leftGemType = -1;
-                    int bottomGemType = -1;
-                    int rightGemType = -1;
-                    int topGemType = -1;
-
-                    //check if there is two gem of the same type of the left
-                    if (CellContent.TryGetValue(idx + new Vector3Int(-1, 0, 0), out var leftContent) &&
-                        leftContent.ContainingGem != null)
-                    {
-                        leftGemType = leftContent.ContainingGem.GemType;
-                    
-                        if (CellContent.TryGetValue(idx + new Vector3Int(-2, 0, 0), out var leftLeftContent) &&
-                            leftLeftContent.ContainingGem != null && leftGemType == leftLeftContent.ContainingGem.GemType)
-                        {
-                            //we have two gem of a given type on the left, so we can't ue that type anymore
-                            availableGems.Remove(leftGemType);
-                        }
-                    }
-                
-                    //check if there is two gem of the same type below
-                    if (CellContent.TryGetValue(idx + new Vector3Int(0, -1, 0), out var bottomContent) &&
-                        bottomContent.ContainingGem != null)
-                    {
-                        bottomGemType = bottomContent.ContainingGem.GemType;
-                        
-                        if (CellContent.TryGetValue(idx + new Vector3Int(0, -2, 0), out var bottomBottomContent) &&
-                            bottomBottomContent.ContainingGem != null && bottomGemType == bottomBottomContent.ContainingGem.GemType)
-                        {
-                            //we have two gem of a given type on the bottom, so we can't ue that type anymore
-                            availableGems.Remove(bottomGemType);
-                        }
-
-                        if (leftGemType != -1 && leftGemType == bottomGemType)
-                        {
-                            //if the left and bottom gem are the same type, we need to check if the bottom left gem is ALSO
-                            //of the same type, as placing that type here would create a square, which is a valid match
-                            if (CellContent.TryGetValue(idx + new Vector3Int(-1, -1, 0), out var bottomLeftContent) &&
-                                bottomLeftContent.ContainingGem != null && bottomGemType == leftGemType)
-                            {
-                                //we already have a corner of gem on left, bottom left and bottom position, so remove that type
-                                availableGems.Remove(leftGemType);
-                            }
-                        }
-                    }
-                    
-                    //as we fill left to right and bottom to top, we could only test left and bottom, but as we can have
-                    //manually placed gems, we still need to test in the other 2 direction to make sure
-                    
-                    //check right
-                    if (CellContent.TryGetValue(idx + new Vector3Int(1, 0, 0), out var rightContent) &&
-                        rightContent.ContainingGem != null)
-                    {
-                        rightGemType = rightContent.ContainingGem.GemType;
-
-                        //we have the same type on left and right, so placing that type here would create a 3 line
-                        if (rightGemType != -1 && leftGemType == rightGemType)
-                        {
-                            availableGems.Remove(rightGemType);
-                        }
-                    
-                        if (CellContent.TryGetValue(idx + new Vector3Int(2, 0, 0), out var rightRightContent) &&
-                            rightRightContent.ContainingGem != null && rightGemType == rightRightContent.ContainingGem.GemType)
-                        {
-                            //we have two gem of a given type on the right, so we can't ue that type anymore
-                            availableGems.Remove(rightGemType);
-                        }
-
-                        //right and bottom gem are the same, check the bottom right to avoid creating a square
-                        if (rightGemType != -1 && rightGemType == bottomGemType)
-                        {
-                            if (CellContent.TryGetValue(idx + new Vector3Int(1, -1, 0), out var bottomRightContent) &&
-                                bottomRightContent.ContainingGem != null && bottomRightContent.ContainingGem.GemType == rightGemType)
-                            {
-                                availableGems.Remove(rightGemType);
-                            }
-                        }
-                    }
-                    
-                    //check up
-                    if (CellContent.TryGetValue(idx + new Vector3Int(0, 1, 0), out var topContent) &&
-                        topContent.ContainingGem != null)
-                    {
-                        topGemType = topContent.ContainingGem.GemType;
-
-                        //we have the same type on top and bottom, so placing that type here would create a 3 line
-                        if (topGemType != -1 && topGemType == bottomGemType)
-                        {
-                            availableGems.Remove(topGemType);
-                        }
-                    
-                        if (CellContent.TryGetValue(idx + new Vector3Int(0, 1, 0), out var topTopContent) &&
-                            topTopContent.ContainingGem != null && topGemType == topTopContent.ContainingGem.GemType)
-                        {
-                            //we have two gem of a given type on the top, so we can't ue that type anymore
-                            availableGems.Remove(topGemType);
-                        }
-
-                        //right and top gem are the same, check the top right to avoid creating a square
-                        if (topGemType != -1 && topGemType == rightGemType)
-                        {
-                            if (CellContent.TryGetValue(idx + new Vector3Int(1, 1, 0), out var topRightContent) &&
-                                topRightContent.ContainingGem != null && topRightContent.ContainingGem.GemType == topGemType)
-                            {
-                                availableGems.Remove(topGemType);
-                            }
-                        }
-                        
-                        //left and top gem are the same, check the top left to avoid creating a square
-                        if (topGemType != -1 && topGemType == leftGemType)
-                        {
-                            if (CellContent.TryGetValue(idx + new Vector3Int(-1, 1, 0), out var topLeftContent) &&
-                                topLeftContent.ContainingGem != null && topLeftContent.ContainingGem.GemType == topGemType)
-                            {
-                                availableGems.Remove(topGemType);
-                            }
-                        }
-                    }
-                    
+                    RemoveGemTypesThatWouldCreateImmediateMatchAt(idx, availableGems,
+                        cellPosition => CellContent.TryGetValue(cellPosition, out var boardCell) ? boardCell.ContainingGem : null);
 
                     var chosenGem = availableGems[Random.Range(0, availableGems.Count)];
                     NewGemAt(idx, m_GemLookup[chosenGem]);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Убирает из <paramref name="availableGemTypes"/> типы, постановка которых в <paramref name="cellIndex"/>
+        /// сразу дала бы готовый матч (как при генерации доски).
+        /// </summary>
+        void RemoveGemTypesThatWouldCreateImmediateMatchAt(Vector3Int cellIndex, List<int> availableGemTypes,
+            Func<Vector3Int, Gem> getGemAtCell)
+        {
+            Gem GemAt(Vector3Int worldCell) => getGemAtCell(worldCell);
+
+            int leftGemType = -1;
+            int bottomGemType = -1;
+            int rightGemType = -1;
+            int topGemType = -1;
+
+            Gem leftGem = GemAt(cellIndex + new Vector3Int(-1, 0, 0));
+            if (leftGem != null)
+            {
+                leftGemType = leftGem.GemType;
+                Gem leftLeftGem = GemAt(cellIndex + new Vector3Int(-2, 0, 0));
+                if (leftLeftGem != null && leftGemType == leftLeftGem.GemType)
+                    availableGemTypes.Remove(leftGemType);
+            }
+
+            Gem bottomGem = GemAt(cellIndex + new Vector3Int(0, -1, 0));
+            if (bottomGem != null)
+            {
+                bottomGemType = bottomGem.GemType;
+                Gem bottomBottomGem = GemAt(cellIndex + new Vector3Int(0, -2, 0));
+                if (bottomBottomGem != null && bottomGemType == bottomBottomGem.GemType)
+                    availableGemTypes.Remove(bottomGemType);
+
+                if (leftGemType != -1 && leftGemType == bottomGemType)
+                {
+                    Gem bottomLeftGem = GemAt(cellIndex + new Vector3Int(-1, -1, 0));
+                    if (bottomLeftGem != null && bottomGemType == leftGemType)
+                        availableGemTypes.Remove(leftGemType);
+                }
+            }
+
+            Gem rightGem = GemAt(cellIndex + new Vector3Int(1, 0, 0));
+            if (rightGem != null)
+            {
+                rightGemType = rightGem.GemType;
+                if (rightGemType != -1 && leftGemType == rightGemType)
+                    availableGemTypes.Remove(rightGemType);
+
+                Gem rightRightGem = GemAt(cellIndex + new Vector3Int(2, 0, 0));
+                if (rightRightGem != null && rightGemType == rightRightGem.GemType)
+                    availableGemTypes.Remove(rightGemType);
+
+                if (rightGemType != -1 && rightGemType == bottomGemType)
+                {
+                    Gem bottomRightGem = GemAt(cellIndex + new Vector3Int(1, -1, 0));
+                    if (bottomRightGem != null && bottomRightGem.GemType == rightGemType)
+                        availableGemTypes.Remove(rightGemType);
+                }
+            }
+
+            Gem topGem = GemAt(cellIndex + new Vector3Int(0, 1, 0));
+            if (topGem != null)
+            {
+                topGemType = topGem.GemType;
+                if (topGemType != -1 && topGemType == bottomGemType)
+                    availableGemTypes.Remove(topGemType);
+
+                Gem topTopGem = GemAt(cellIndex + new Vector3Int(0, 2, 0));
+                if (topTopGem != null && topGemType == topTopGem.GemType)
+                    availableGemTypes.Remove(topGemType);
+
+                if (topGemType != -1 && topGemType == rightGemType)
+                {
+                    Gem topRightGem = GemAt(cellIndex + new Vector3Int(1, 1, 0));
+                    if (topRightGem != null && topRightGem.GemType == topGemType)
+                        availableGemTypes.Remove(topGemType);
+                }
+
+                if (topGemType != -1 && topGemType == leftGemType)
+                {
+                    Gem topLeftGem = GemAt(cellIndex + new Vector3Int(-1, 1, 0));
+                    if (topLeftGem != null && topLeftGem.GemType == topGemType)
+                        availableGemTypes.Remove(topGemType);
                 }
             }
         }
@@ -488,19 +478,19 @@ namespace Match3
             if (m_SwapStage != SwapStage.None)
             {
                 TickSwap();
-                //return;
+                // return;
             }
 
-            //this will set to false if ANYTHING happen.
-            //only increment when the board is still and nothing happens
-            //the starting value is if we have a bonus item or not (if we have one, this cannot increment)
+            // станет false при любом событии на доске
+            // увеличивается только когда доска неподвижна и ничего не происходит
+            // изначально true, если нет активного бонусного предмета (с бонусом таймер подсказки не тикает)
             bool incrementHintTimer = m_ActivatedBonus == null;
 
             if (m_TickingCells.Count > 0)
             {
                 MoveGems();
                 
-                //to avoid sound clash we make sure we only play a falling sound if none are already playing
+                // чтобы не наслаивать звуки — падение играем только если другой звук падения не играет
                 if (m_TickingCells.Count == 0 && (m_FallingSoundSource == null || !m_FallingSoundSource.isPlaying))
                 {
                     m_FallingSoundSource = GameManager.Instance.PlaySFX(GameManager.Instance.Settings.SoundSettings.FallSound);
@@ -567,32 +557,39 @@ namespace Match3
                     return;
                 }
 
-                if (m_BoardChanged)
+                if (m_BoardChanged && !m_ReshuffleAnimationInProgress)
                 {
-                    FindAllPossibleMatch();
                     m_BoardChanged = false;
-                    LevelData.Instance.OnBoardSettled();
+                    StartCoroutine(BoardSettledReshuffleRoutine());
                 }
             
-                var match = m_PossibleSwaps[m_PickedSwap];
-                if (m_HintIndicator.activeSelf)
+                if (m_PossibleSwaps.Count > 0)
                 {
-                    var startPos = m_Grid.GetCellCenterWorld(match.StartPosition);
-                    var endPos = m_Grid.GetCellCenterWorld(match.StartPosition + match.Direction);
+                    var match = m_PossibleSwaps[m_PickedSwap];
+                    if (m_HintIndicator.activeSelf)
+                    {
+                        var startPos = m_Grid.GetCellCenterWorld(match.StartPosition);
+                        var endPos = m_Grid.GetCellCenterWorld(match.StartPosition + match.Direction);
 
-                    var current = m_HintIndicator.transform.position;
-                    current = Vector3.MoveTowards(current, endPos, 1.0f * Time.deltaTime);
+                        var current = m_HintIndicator.transform.position;
+                        current = Vector3.MoveTowards(current, endPos, 1.0f * Time.deltaTime);
 
-                    m_HintIndicator.transform.position = current == endPos ? startPos : current;
+                        m_HintIndicator.transform.position = current == endPos ? startPos : current;
+                    }
+                    else
+                    {
+                        m_SinceLastHint += Time.deltaTime;
+                        if (m_SinceLastHint >= GameManager.Instance.Settings.InactivityBeforeHint && m_InputEnabled)
+                        {
+                            m_HintIndicator.transform.position = m_Grid.GetCellCenterWorld(match.StartPosition);
+                            m_HintIndicator.SetActive(true);
+                        }
+                    }
                 }
                 else
                 {
-                    m_SinceLastHint += Time.deltaTime;
-                    if (m_SinceLastHint >= GameManager.Instance.Settings.InactivityBeforeHint && m_InputEnabled)
-                    {
-                        m_HintIndicator.transform.position = m_Grid.GetCellCenterWorld(match.StartPosition);
-                        m_HintIndicator.SetActive(true);
-                    }
+                    m_HintIndicator.SetActive(false);
+                    m_SinceLastHint = 0.0f;
                 }
             }
             else
@@ -604,8 +601,8 @@ namespace Match3
 
         void MoveGems()
         {
-            //sort bottom left to top right, so we minimize timing issue (a gem on top try to fall into a cell that is 
-            //not yet empty but will be empty once the bottom gem move away)
+            // сортировка снизу-слева к верху-справа: меньше гонок (верхний гем может «упасть» в ячейку,
+            // которая ещё занята, но освободится, когда уйдёт нижний)
             m_TickingCells.Sort((a, b) =>
             {
                 int yCmp = a.y.CompareTo(b.y);
@@ -631,7 +628,7 @@ namespace Match3
                     continue;
                 }
                 
-                //update either position or state.
+                // обновление позиции или состояния
                 if (currentCell.IncomingGem?.CurrentState == Gem.State.Falling)
                 {
                     var gem = currentCell.IncomingGem;
@@ -652,10 +649,10 @@ namespace Match3
                         currentCell.ContainingGem = gem;
                         gem.MoveTo(cellIdx);
                         
-                        //reached target position, now check if continue falling or finished its fall.
+                        // достигли целевой ячейки — продолжаем падение или завершаем
                         if (m_EmptyCells.Contains(cellIdx + Vector3Int.down) && CellContent.TryGetValue(cellIdx + Vector3Int.down, out var belowCell))
                         {
-                            //incoming gem goes to the below cell
+                            // входящий гем переходит в ячейку снизу
                             currentCell.ContainingGem = null;
                             belowCell.IncomingGem = gem;
 
@@ -667,8 +664,7 @@ namespace Match3
                             m_EmptyCells.Remove(target);
                             m_EmptyCells.Add(cellIdx);
 
-                            //if we continue falling, this is now an empty space, if there is a gem above it will fall by itself
-                            //but if this is a spawner above, we need to spawn a new gem
+                            // ячейка остаётся пустой; гем сверху упадёт сам; над спавнером — создаём новый гем
                             if (SpawnerPosition.Contains(cellIdx + Vector3Int.up))
                             {
                                 ActivateSpawnerAt(cellIdx);
@@ -679,7 +675,7 @@ namespace Match3
                                  m_EmptyCells.Contains(cellIdx + Vector3Int.down + Vector3Int.left) &&
                                  CellContent.TryGetValue(cellIdx + Vector3Int.down + Vector3Int.left, out var belowLeftCell))
                         {
-                            //the cell to the left is either non existing or locked, and below that is an empty space, we can fall diagonally
+                            // слева нет ячейки или блок падения — можно упасть по диагонали вниз-влево
                             currentCell.ContainingGem = null;
                             belowLeftCell.IncomingGem = gem;
 
@@ -688,12 +684,11 @@ namespace Match3
                             var target = cellIdx + Vector3Int.down + Vector3Int.left;
                             m_NewTickingCells.Add(target);
                             
-                            //if the empty cell was part of the empty cell list, we need to remove it it's not empty anymore
+                            // убрать цель из списка пустых, текущую ячейку добавить как пустую
                             m_EmptyCells.Remove(target);
                             m_EmptyCells.Add(cellIdx);
 
-                            //if we continue falling, this is now an empty space, if there is a gem above it will fall by itself
-                            //but if this is a spawner above, we need to spawn a new gem
+                            // ячейка остаётся пустой; гем сверху упадёт сам; над спавнером — создаём новый гем
                             if (SpawnerPosition.Contains(cellIdx + Vector3Int.up))
                             {
                                 ActivateSpawnerAt(cellIdx);
@@ -704,8 +699,8 @@ namespace Match3
                                  m_EmptyCells.Contains(cellIdx + Vector3Int.down + Vector3Int.right) &&
                                  CellContent.TryGetValue(cellIdx + Vector3Int.down + Vector3Int.right, out var belowRightCell))
                         {
-                            //we couldn't fall directly below, so we check diagonally
-                            //incoming gem goes to the below cell
+                            // прямо вниз нельзя — диагональ вниз-вправо
+                            // входящий гем переходит в ячейку снизу
                             currentCell.ContainingGem = null;
                             belowRightCell.IncomingGem = gem;
 
@@ -714,12 +709,11 @@ namespace Match3
                             var target = cellIdx + Vector3Int.down + Vector3Int.right;
                             m_NewTickingCells.Add(target);
                             
-                            //if the empty cell was part of the empty cell list, we need to remove it it's not empty anymore
+                            // убрать цель из списка пустых, текущую ячейку добавить как пустую
                             m_EmptyCells.Remove(target);
                             m_EmptyCells.Add(cellIdx);
 
-                            //if we continue falling, this is now an empty space, if there is a gem above it will fall by itself
-                            //but if this is a spawner above, we need to spawn a new gem
+                            // ячейка остаётся пустой; гем сверху упадёт сам; над спавнером — создаём новый гем
                             if (SpawnerPosition.Contains(cellIdx + Vector3Int.up))
                             {
                                 ActivateSpawnerAt(cellIdx);
@@ -727,7 +721,7 @@ namespace Match3
                         }
                         else
                         {
-                            //re add but this time we will bounce and not fall.
+                            // снова в список тикающих, но уже отскок, не падение
                             m_NewTickingCells.Add(cellIdx);
                             gem.StopFalling();
                         }
@@ -762,7 +756,7 @@ namespace Match3
                 }
                 else if(currentCell.ContainingGem?.CurrentState == Gem.State.Still)
                 {
-                    //a ticking cells should only be falling or bouncing, if neither of those, remove it 
+                    // в тикающих должны быть только падающие или отскакивающие — иначе убираем из списка
                     m_TickingCells.RemoveAt(i);
                     i--;
                 }
@@ -796,9 +790,8 @@ namespace Match3
 
                     if (gem.CurrentState == Gem.State.Bouncing)
                     {
-                        //we stop it bouncing as it is getting destroyed
-                        //We check both current and new ticking cells, as it could be the first frame where it started
-                        //bouncing so it will be in the new ticking cells NOT in the ticking cell list yet.
+                        // останавливаем отскок, гем уничтожается
+                        // проверяем и текущий, и новый список тикающих: в первом кадре отскока гем может быть только в m_NewTickingCells
                         if(m_TickingCells.Contains(gemIdx)) m_TickingCells.Remove(gemIdx);
                         if(m_NewTickingCells.Contains(gemIdx)) m_NewTickingCells.Remove(gemIdx);
                         
@@ -807,7 +800,7 @@ namespace Match3
                         gem.StopBouncing();
                     }
 
-                    //forced deletion doesn't wait for end of timer
+                    // принудительное удаление не ждёт таймер
                     if (match.ForcedDeletion || match.DeletionTimer > 1.0f)
                     {
                         Destroy(CellContent[gemIdx].ContainingGem.gameObject);
@@ -818,7 +811,7 @@ namespace Match3
                             CellContent[gemIdx].Obstacle.Clear();
                         }
 
-                        //callback are only called when this was a match from swipe and not from bonus or other source 
+                        // колбэк только для матча со свайпа, не от бонуса и т.п.
                         if (!match.ForcedDeletion && m_CellsCallbacks.TryGetValue(gemIdx, out var clbk))
                         {
                             clbk.Invoke();
@@ -828,7 +821,7 @@ namespace Match3
                         j--;
 
                         match.DeletedCount += 1;
-                        //we only spawn coins for non bonus match
+                        // монеты только за обычный матч (не принудительный)
                         if (match.DeletedCount >= 4 && !match.ForcedDeletion)
                         {
                             GameManager.Instance.ChangeCoins(1);
@@ -845,7 +838,7 @@ namespace Match3
                             m_EmptyCells.Add(gemIdx);
                         }
 
-                        //
+                        // эффекты матча и скрытие гема
                         if (gem.CurrentState != Gem.State.Disappearing)
                         {
                             LevelData.Instance.GemMatched(gem);
@@ -917,7 +910,7 @@ namespace Match3
             m_BoardActions.Add(action);
         }
 
-        //useful for bonus, this will create a new match and you can add anything you want to it.
+        // удобно для бонусов: создаёт новый матч, в который можно добавить что угодно
         public Match CreateCustomMatch(Vector3Int newCell)
         {
             var newMatch = new Match()
@@ -938,7 +931,7 @@ namespace Match3
             if (m_FreezeMoveLock > 0)
                 return;
             
-            //go over empty cells
+            // обход пустых ячеек
             for (int i = 0; i < m_EmptyCells.Count; ++i)
             {
                 var emptyCell = m_EmptyCells[i];
@@ -953,7 +946,7 @@ namespace Match3
                 var aboveCellIdx = emptyCell + Vector3Int.up;
                 bool aboveCellExist = CellContent.TryGetValue(aboveCellIdx, out var aboveCell);
 
-                //if we have a gem above an empty cell, make that gem fall
+                // над пустой ячейкой есть гем — заставляем его упасть
                 if (aboveCellExist && aboveCell.ContainingGem != null && aboveCell.CanFall)
                 {
                     var incomingGem = aboveCell.ContainingGem;
@@ -963,10 +956,10 @@ namespace Match3
                     incomingGem.StartMoveTimer();
                     incomingGem.SpeedMultiplier = 1.0f;
 
-                    //add that empty cell to be ticked so the gem goes down into it
+                    // добавляем целевую ячейку в тикающие, чтобы гем дошёл до неё
                     m_NewTickingCells.Add(emptyCell);
 
-                    //the above cell is now empty and this cell is not empty anymore
+                    // верхняя ячейка пуста, текущая — занята входящим гемом
                     m_EmptyCells.Add(aboveCellIdx);
                     m_EmptyCells.Remove(emptyCell);
                 }
@@ -981,10 +974,10 @@ namespace Match3
                     incomingGem.StartMoveTimer();
                     incomingGem.SpeedMultiplier = 1.41421356237f;
 
-                    //add that empty cell to be ticked so the gem goes down into it
+                    // добавляем целевую ячейку в тикающие, чтобы гем дошёл до неё
                     m_NewTickingCells.Add(emptyCell);
 
-                    //the above cell is now empty and this cell is not empty anymore
+                    // верхняя ячейка пуста, текущая — занята входящим гемом
                     m_EmptyCells.Add(aboveCellIdx + Vector3Int.right);
                     m_EmptyCells.Remove(emptyCell);
                 }
@@ -999,22 +992,22 @@ namespace Match3
                     incomingGem.StartMoveTimer();
                     incomingGem.SpeedMultiplier = 1.41421356237f;
 
-                    //add that empty cell to be ticked so the gem goes down into it
+                    // добавляем целевую ячейку в тикающие, чтобы гем дошёл до неё
                     m_NewTickingCells.Add(emptyCell);
 
-                    //the above cell is now empty and this cell is not empty anymore
+                    // верхняя ячейка пуста, текущая — занята входящим гемом
                     m_EmptyCells.Add(aboveCellIdx + Vector3Int.left);
                     m_EmptyCells.Remove(emptyCell);
                 }
                 else if (SpawnerPosition.Contains(aboveCellIdx))
                 {
-                    //spawn a new gem
+                    // создать новый гем
                     ActivateSpawnerAt(emptyCell);
                 }
             }
 
-            //empty cell are only handled once, sow e clear the list everytime it been checked.
-            //m_EmptyCells.Clear();
+            // пустые ячейки обрабатываются за один проход; список не очищаем здесь
+            // m_EmptyCells.Clear();
         }
 
         void DoMatchCheck()
@@ -1035,7 +1028,7 @@ namespace Match3
                 center + Vector3.right * 0.5f - Vector3.down * 0.5f);
         }
 
-        //if gemPrefab is null, will pick a random gem from the existing one
+        // если gemPrefab == null, берётся случайный из ExistingGems
         Gem NewGemAt(Vector3Int cell, Gem gemPrefab)
         {
             if (gemPrefab == null)
@@ -1049,7 +1042,7 @@ namespace Match3
                 }
             }
 
-            //New Gem may be called after the board was init (as startup doesn't seem to be reliably called BEFORE init)
+            // NewGemAt может вызываться после Init (порядок Startup/Init не гарантирован)
             if (CellContent[cell].ContainingGem != null)
             {
                 Destroy(CellContent[cell].ContainingGem.gameObject);
@@ -1089,10 +1082,10 @@ namespace Match3
 
             if (gemToStart.transform.position == startPosition)
             {
-                //swap if finished
+                // обмен завершён
                 if (m_SwapStage == SwapStage.Forward)
                 {
-                    //temporaly unlock as we need to in order to delete the gems properly if they matched
+                    // временно снимаем блокировку, чтобы корректно удалить гемы при матче
                     CellContent[m_SwappingCells.Item1].Locked = false;
                     CellContent[m_SwappingCells.Item2].Locked = false;
                     
@@ -1132,18 +1125,18 @@ namespace Match3
 
                         m_SwapStage = SwapStage.None;
 
-                        // as swap was successful, we count down 1 move from the level
+                        // успешный обмен — засчитываем ход уровня
                         LevelData.Instance.PlayerMoved();
                     }
                     else
                     {
-                        //if there is no match, we revert the swap
+                        // матча нет — откатываем обмен
                         (CellContent[m_SwappingCells.Item1].IncomingGem, CellContent[m_SwappingCells.Item2].IncomingGem) = (
                             CellContent[m_SwappingCells.Item2].IncomingGem, CellContent[m_SwappingCells.Item1].IncomingGem);
                         (m_SwappingCells.Item1, m_SwappingCells.Item2) = (m_SwappingCells.Item2, m_SwappingCells.Item1);
                         m_SwapStage = SwapStage.Return;
                         
-                        //relock the cells as they are swapping bacl
+                        // снова блокируем ячейки на время обратного обмена
                         CellContent[m_SwappingCells.Item1].Locked = true;
                         CellContent[m_SwappingCells.Item2].Locked = true;
                     }
@@ -1159,7 +1152,7 @@ namespace Match3
                     CellContent[m_SwappingCells.Item1].IncomingGem = null;
                     CellContent[m_SwappingCells.Item2].IncomingGem = null;
                     
-                    //they are not locked anymore and can resume falling/being deleted
+                    // блокировка снята — снова можно падать и удаляться
                     CellContent[m_SwappingCells.Item1].Locked = false;
                     CellContent[m_SwappingCells.Item2].Locked = false;
 
@@ -1169,16 +1162,16 @@ namespace Match3
         }
 
         /// <summary>
-        /// This will return true if a match was found. Setting createMatch to false allow to just check for existing match
-        /// which is used by the match finder to check for match possible by swipe 
+        /// true, если найден матч. При createMatch == false только проверка без создания матча
+        /// (поиск возможных ходов по свайпу).
         /// </summary>
         bool DoCheck(Vector3Int startCell, bool createMatch = true)
         {
-            // in the case we call this with an empty cell. Shouldn't happen, but let's be safe
+            // вызов с пустой ячейкой не ожидается, но на всякий случай
             if (!CellContent.TryGetValue(startCell, out var centerGem) || centerGem.ContainingGem == null)
                 return false;
 
-            //we ignore that gem if it's already part of another match.
+            // гем уже в другом матче — пропускаем
             if (centerGem.ContainingGem.CurrentMatch != null)
                 return false;
 
@@ -1187,7 +1180,7 @@ namespace Match3
                 Vector3Int.up, Vector3Int.right, Vector3Int.down, Vector3Int.left
             };
 
-            //First find all the connected gem of the same type
+            // сначала все связные гемы того же типа
             List<Vector3Int> gemList = new List<Vector3Int>();
             List<Vector3Int> checkedCells = new();
 
@@ -1218,7 +1211,7 @@ namespace Match3
                 }
             }
 
-            //we try to fit any bonus shapes in
+            // подбираем бонусные формы
             List<Vector3Int> temporaryShapeMatch = new();
             MatchShape matchedShape = null;
             List<BonusGem> matchedBonusGem = new();
@@ -1231,26 +1224,26 @@ namespace Match3
                         if (matchedShape == null || matchedShape.Cells.Count < shape.Cells.Count)
                         {
                             matchedShape = shape;
-                            //we have a new shape that have more gem, so we clear our existing list of bonus
+                            // новая форма больше — сбрасываем список кандидатов в бонусы
                             matchedBonusGem.Clear();
                             matchedBonusGem.Add(bonusGem);
                         }
                         else if (matchedShape.Cells.Count == shape.Cells.Count)
                         {
-                            //this new bonus have exactly the same number of the existing bonus, so become a new possible bonus
+                            // тот же размер, что у текущего кандидата — ещё один вариант бонуса
                             matchedBonusGem.Add(bonusGem);
                         }
                     }
                 }
             }
 
-            //-- now we build a list of all line of 3+ gems
+            // далее — все линии из 3+ гемов
             List<Vector3Int> lineList = new();
 
             foreach (var idx in gemList)
             {
-                //for each dir (up/down/left/right) if there is no gem in that dir, that mean this could be the start of
-                //a matching line, so we check in the opposite direction till we have no more gem
+                // для каждого направления: если в сторону нет гема, это может быть конец линии —
+                // считаем в противоположную сторону
                 foreach (var dir in offsets)
                 {
                     if (!gemList.Contains(idx + dir))
@@ -1271,7 +1264,7 @@ namespace Match3
                 }
             }
 
-            //no lines and no bonus match, so there is no match in that.
+            // нет линий и бонусной фигуры — матча нет
             if (lineList.Count == 0 && temporaryShapeMatch.Count == 0)
                 return false;
 
@@ -1326,7 +1319,7 @@ namespace Match3
             if (pressedThisFrame)
             {
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
-                //if the debug menu is open we instantiate the selected gem in the click cell
+                // открыто меню отладки — ставим выбранный гем в ячейку клика
                 if (UIHandler.Instance.DebugMenuOpen)
                 {
                     if (UIHandler.Instance.SelectedDebugGem != null)
@@ -1346,7 +1339,7 @@ namespace Match3
                     return;
                 }
 #endif
-                //if we had an activated bonus, clicking somewhere will use it 
+                // активирован бонус — клик по полю применяет его
                 if (m_ActivatedBonus != null)
                 {
                     var clickedCell = m_Grid.WorldToCell(mainCam.ScreenToWorldPoint(clickPos));
@@ -1380,7 +1373,7 @@ namespace Match3
             }
             else if (releasedThisFrame)
             {
-                //m_IsHoldingTouch = false;
+                // m_IsHoldingTouch = false;
                 if(m_GemHoldVFXInstance != null) m_GemHoldVFXInstance.gameObject.SetActive(false);
                 if(m_HoldTrailInstance != null) m_HoldTrailInstance.gameObject.SetActive(false);
                 
@@ -1390,7 +1383,7 @@ namespace Match3
                     return;
                 }
 #endif
-                //early exit if we already have a swipe queued or in progress, only one can happen at once
+                // уже есть очередь или идёт обмен — второй свайп не обрабатываем
                 if (m_SwipeQueued || m_SwapStage != SwapStage.None)
                     return;
                 
@@ -1401,7 +1394,7 @@ namespace Match3
                 var startCell = m_Grid.WorldToCell(worldStart);
                 startCell.z = 0;
             
-                //if last than .3 second since last click, this is a double click, activate the gem if that is a gem.
+                // меньше 0,3 с с прошлого клика — двойной клик; если это гем с Usable — активировать
                 if (clickDelta < 0.3f)
                 {
                     if (CellContent.TryGetValue(startCell, out var content) 
@@ -1416,14 +1409,14 @@ namespace Match3
 
                 var endWorldPos = mainCam.ScreenToWorldPoint(clickPos);
             
-                //we compute the swipe in world position as then a swipe of 1 is the distance between 2 cell
+                // свайп в мировых координатах: смещение на 1 — расстояние между центрами соседних ячеек
                 var swipe = endWorldPos - worldStart;
                 if (swipe.sqrMagnitude < 0.5f * 0.5f)
                 {
                     return;
                 }
 
-                //the starting cell isn't a valid cell, so we exit
+                // начальная ячейка не на доске — выход
                 if (!CellContent.TryGetValue(startCell, out var startCellContent) 
                     || !startCellContent.CanBeMoved)
                 {
@@ -1455,15 +1448,15 @@ namespace Match3
                     }
                 }
 
-                //the ending cell isn't a valid cell, exit
+                // конечная ячейка не на доске — выход
                 if (!CellContent.TryGetValue(endCell, out var endCellContent) || !endCellContent.CanBeMoved)
                     return;
                 
-                //both work so we lock them so they cannot be deleted or moved until the swap end
+                // обе ячейки валидны — блокируем до конца обмена
                 startCellContent.Locked = true;
                 endCellContent.Locked = true;
                 
-                //we make sure to remove those cell from the ticking cell if they are in (we swipped as it was falling)
+                // убираем ячейки из тикающих, если свайпнули падающий гем
 
                 m_SwipeQueued = true;
                 m_StartSwipe = startCell;
@@ -1476,15 +1469,260 @@ namespace Match3
             m_ActivatedBonus = item;
         }
 
+        [Button("Решафл доски (дебаг)", EButtonEnableMode.Playmode)]
+        private void DebugReshuffleBoard()
+        {
+            if (!m_BoardWasInit)
+            {
+                Debug.LogWarning("[Board] Доска ещё не инициализирована.");
+                return;
+            }
+
+            if (m_SwapStage != SwapStage.None)
+            {
+                Debug.LogWarning("[Board] Дождитесь окончания обмена гемов.");
+                return;
+            }
+
+            if (m_TickingCells.Count > 0 || m_NewTickingCells.Count > 0 || m_TickingMatch.Count > 0 ||
+                m_CellToMatchCheck.Count > 0)
+            {
+                Debug.LogWarning("[Board] Дождитесь стабилизации доски (нет падений, матчей и отложенных проверок матча).");
+                return;
+            }
+
+            if (m_ReshuffleAnimationInProgress)
+            {
+                Debug.LogWarning("[Board] Решафл уже выполняется.");
+                return;
+            }
+
+            StartCoroutine(DebugReshuffleRoutine());
+        }
+
+        IEnumerator BoardSettledReshuffleRoutine()
+        {
+            m_ReshuffleAnimationInProgress = true;
+            ToggleInput(false);
+            yield return RunReshufflePasses(forceReshuffleEvenIfMovesExist: false);
+            ToggleInput(true);
+            m_ReshuffleAnimationInProgress = false;
+            LevelData.Instance.OnBoardSettled();
+        }
+
+        IEnumerator DebugReshuffleRoutine()
+        {
+            m_ReshuffleAnimationInProgress = true;
+            ToggleInput(false);
+            yield return RunReshufflePasses(forceReshuffleEvenIfMovesExist: true);
+            ToggleInput(true);
+            m_ReshuffleAnimationInProgress = false;
+        }
+
+        /// <summary>
+        /// Пересчитывает возможные ходы; при отсутствии ходов — решафл с анимацией (до лимита попыток).
+        /// При force — минимум один решафл даже если ходы уже есть (дебаг).
+        /// </summary>
+        IEnumerator RunReshufflePasses(bool forceReshuffleEvenIfMovesExist)
+        {
+            FindAllPossibleMatch();
+            int reshuffleAttempts = 0;
+
+            if (forceReshuffleEvenIfMovesExist && reshuffleAttempts < MaxBoardReshuffleAttempts)
+            {
+                if (TryPrepareReshuffleMovableGems(out List<Vector3Int> movableCellsForce, out List<Gem> shuffledGemsForce,
+                        out Dictionary<Gem, Vector3> startWorldByGemForce))
+                {
+                    ApplyReshuffleAssignment(movableCellsForce, shuffledGemsForce, startWorldByGemForce);
+                    Tween tweenForce = CreateReshuffleAnimationTween(movableCellsForce, shuffledGemsForce, startWorldByGemForce);
+                    reshuffleAttempts++;
+                    if (tweenForce != null && tweenForce.IsActive())
+                        yield return tweenForce.WaitForCompletion(true);
+                    FindAllPossibleMatch();
+                }
+            }
+
+            while (m_PossibleSwaps.Count == 0 && reshuffleAttempts < MaxBoardReshuffleAttempts)
+            {
+                if (!TryPrepareReshuffleMovableGems(out List<Vector3Int> movableCells, out List<Gem> shuffledGems,
+                        out Dictionary<Gem, Vector3> startWorldByGem))
+                    break;
+
+                ApplyReshuffleAssignment(movableCells, shuffledGems, startWorldByGem);
+                Tween tween = CreateReshuffleAnimationTween(movableCells, shuffledGems, startWorldByGem);
+                reshuffleAttempts++;
+                if (tween != null && tween.IsActive())
+                    yield return tween.WaitForCompletion(true);
+                FindAllPossibleMatch();
+            }
+        }
+
+        bool TryPrepareReshuffleMovableGems(out List<Vector3Int> movableCells, out List<Gem> shuffledGems,
+            out Dictionary<Gem, Vector3> startWorldByGem)
+        {
+            movableCells = new List<Vector3Int>();
+            for (int y = m_BoundsInt.yMin; y <= m_BoundsInt.yMax; ++y)
+            {
+                for (int x = m_BoundsInt.xMin; x <= m_BoundsInt.xMax; ++x)
+                {
+                    var cellIndex = new Vector3Int(x, y, 0);
+                    if (!CellContent.TryGetValue(cellIndex, out var cell))
+                        continue;
+                    if (!cell.CanBeMoved || cell.IncomingGem != null)
+                        continue;
+                    if (cell.ContainingGem == null || cell.ContainingGem.CurrentMatch != null)
+                        continue;
+
+                    movableCells.Add(cellIndex);
+                }
+            }
+
+            if (movableCells.Count < 2)
+            {
+                shuffledGems = null;
+                startWorldByGem = null;
+                return false;
+            }
+
+            var gemsPool = new List<Gem>(movableCells.Count);
+            startWorldByGem = new Dictionary<Gem, Vector3>();
+            foreach (Vector3Int cellIndex in movableCells)
+            {
+                Gem gem = CellContent[cellIndex].ContainingGem;
+                gemsPool.Add(gem);
+                startWorldByGem[gem] = gem.transform.position;
+            }
+
+            var movableCellSet = new HashSet<Vector3Int>(movableCells);
+
+            for (int attempt = 0; attempt < MaxNoMatchReshuffleBuildAttempts; attempt++)
+            {
+                var remainingGems = new List<Gem>(gemsPool);
+                for (int shuffleIndex = remainingGems.Count - 1; shuffleIndex > 0; shuffleIndex--)
+                {
+                    int randomPick = Random.Range(0, shuffleIndex + 1);
+                    (remainingGems[shuffleIndex], remainingGems[randomPick]) =
+                        (remainingGems[randomPick], remainingGems[shuffleIndex]);
+                }
+
+                var simulationPlacements = new Dictionary<Vector3Int, Gem>();
+                bool placementFailed = false;
+
+                foreach (Vector3Int cellIndex in movableCells)
+                {
+                    Gem GemAccessorForReshuffleSimulation(Vector3Int worldCell)
+                    {
+                        if (simulationPlacements.TryGetValue(worldCell, out Gem placedGem))
+                            return placedGem;
+                        if (movableCellSet.Contains(worldCell))
+                            return null;
+                        return CellContent.TryGetValue(worldCell, out BoardCell boardCell) ? boardCell.ContainingGem : null;
+                    }
+
+                    m_ScratchGemTypesForReshuffle.Clear();
+                    foreach (Gem gem in remainingGems)
+                        m_ScratchGemTypesForReshuffle.Add(gem.GemType);
+
+                    var allowedTypesForCell = new List<int>(m_ScratchGemTypesForReshuffle);
+                    RemoveGemTypesThatWouldCreateImmediateMatchAt(cellIndex, allowedTypesForCell, GemAccessorForReshuffleSimulation);
+
+                    var candidateGems = new List<Gem>();
+                    foreach (Gem gem in remainingGems)
+                    {
+                        if (allowedTypesForCell.Contains(gem.GemType))
+                            candidateGems.Add(gem);
+                    }
+
+                    if (candidateGems.Count == 0)
+                    {
+                        placementFailed = true;
+                        break;
+                    }
+
+                    Gem chosenGem = candidateGems[Random.Range(0, candidateGems.Count)];
+                    simulationPlacements[cellIndex] = chosenGem;
+                    remainingGems.Remove(chosenGem);
+                }
+
+                if (placementFailed || remainingGems.Count > 0)
+                    continue;
+
+                shuffledGems = new List<Gem>(movableCells.Count);
+                foreach (Vector3Int cellIndex in movableCells)
+                    shuffledGems.Add(simulationPlacements[cellIndex]);
+
+                return true;
+            }
+
+            shuffledGems = null;
+            return false;
+        }
+
+        void ApplyReshuffleAssignment(List<Vector3Int> movableCells, List<Gem> shuffledGems, Dictionary<Gem, Vector3> startWorldByGem)
+        {
+            for (int i = 0; i < movableCells.Count; i++)
+            {
+                Vector3Int cellIndex = movableCells[i];
+                Gem gem = shuffledGems[i];
+                CellContent[cellIndex].ContainingGem = gem;
+                gem.MoveTo(cellIndex);
+                gem.transform.position = startWorldByGem[gem];
+            }
+        }
+
+        Tween CreateReshuffleAnimationTween(List<Vector3Int> movableCells, List<Gem> shuffledGems, Dictionary<Gem, Vector3> startWorldByGem)
+        {
+            DOTween.Kill(this, false);
+
+            Sequence masterSequence = DOTween.Sequence().SetId(this);
+            bool anyMovement = false;
+
+            for (int i = 0; i < movableCells.Count; i++)
+            {
+                Gem gem = shuffledGems[i];
+                Transform gemTransform = gem.transform;
+                Vector3 startWorld = startWorldByGem[gem];
+                Vector3 endWorld = m_Grid.GetCellCenterWorld(movableCells[i]);
+
+                if ((startWorld - endWorld).sqrMagnitude < 0.00002f)
+                    continue;
+
+                anyMovement = true;
+                DOTween.Kill(gemTransform, false);
+
+                float distance = Vector3.Distance(startWorld, endWorld);
+                float arcLift = Mathf.Clamp(distance * ReshuffleArcHeightFactor, ReshuffleArcHeightMin, ReshuffleArcHeightMax);
+                Vector3 midPoint = Vector3.Lerp(startWorld, endWorld, 0.5f) + Vector3.up * arcLift;
+
+                Sequence gemSequence = DOTween.Sequence();
+                gemSequence.Append(gemTransform.DOMove(midPoint, ReshuffleLiftPhaseSeconds).SetEase(Ease.OutQuad));
+                gemSequence.Append(gemTransform.DOMove(endWorld, ReshuffleFlyPhaseSeconds).SetEase(Ease.OutBack, 1.1f));
+                gemSequence.Join(gemTransform.DOScale(ReshuffleScalePulse, ReshuffleLiftPhaseSeconds * 0.55f)
+                    .SetLoops(2, LoopType.Yoyo)
+                    .SetEase(Ease.OutQuad));
+                gemSequence.OnComplete(() =>
+                {
+                    if (gem != null && gemTransform != null)
+                        gemTransform.localScale = Vector3.one;
+                });
+
+                masterSequence.Insert(ReshuffleStaggerSeconds * i, gemSequence);
+            }
+
+            if (!anyMovement)
+                return null;
+
+            return masterSequence;
+        }
+
         void FindAllPossibleMatch()
         {
-            //TODO : instead of going over every gems just do it on moved gems for optimization
+            // TODO: вместо полного обхода — только сдвинутые гемы (оптимизация)
         
             m_PossibleSwaps.Clear();
         
-            //we use a double loop instead of directly querying the cells, so we access them in increasing x then y coordinate
-            //this allow to just have to test swapping upward then right, as down and left will have been tested by previous
-            //gem already
+            // двойной цикл по возрастанию x, y вместо произвольного обхода словаря
+            // достаточно проверять обмен вверх и вправо: вниз и влево уже покрыты соседними ячейками
 
             for (int y = m_BoundsInt.yMin; y <= m_BoundsInt.yMax; ++y)
             {
@@ -1498,7 +1736,7 @@ namespace Match3
                     
                         if (CellContent.TryGetValue(topIdx, out var topCell) && topCell.CanBeMoved)
                         {
-                            //swap the cell
+                            // временно меняем гемы местами
                             (CellContent[idx].ContainingGem, CellContent[topIdx].ContainingGem) = (
                                 CellContent[topIdx].ContainingGem, CellContent[idx].ContainingGem);
                         
@@ -1520,14 +1758,14 @@ namespace Match3
                                 });
                             }
                         
-                            //swap back
+                            // возвращаем как было
                             (CellContent[idx].ContainingGem, CellContent[topIdx].ContainingGem) = (
                                 CellContent[topIdx].ContainingGem, CellContent[idx].ContainingGem);
                         }
                     
                         if (CellContent.TryGetValue(rightIdx, out var rightCell) && rightCell.CanBeMoved)
                         {
-                            //swap the cell
+                            // временно меняем гемы местами
                             (CellContent[idx].ContainingGem, CellContent[rightIdx].ContainingGem) = (
                                 CellContent[rightIdx].ContainingGem, CellContent[idx].ContainingGem);
                         
@@ -1549,7 +1787,7 @@ namespace Match3
                                 });
                             }
                         
-                            //swap back
+                            // возвращаем как было
                             (CellContent[idx].ContainingGem, CellContent[rightIdx].ContainingGem) = (
                                 CellContent[rightIdx].ContainingGem, CellContent[idx].ContainingGem);
                         }
@@ -1558,7 +1796,10 @@ namespace Match3
             }
 
 
-            m_PickedSwap = Random.Range(0, m_PossibleSwaps.Count);
+            if (m_PossibleSwaps.Count > 0)
+            {
+                m_PickedSwap = Random.Range(0, m_PossibleSwaps.Count);
+            }
         }
     }
 }

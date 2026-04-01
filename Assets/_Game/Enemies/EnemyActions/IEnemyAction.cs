@@ -1,8 +1,15 @@
+using System.Collections;
+
 namespace Match3
 {
     public interface IEnemyAction
     {
         void OnPlayerMoved(BattleState state);
-        bool TryExecute(BattleState state);
+        IEnumerator TryExecute(BattleState state);
+    }
+
+    public interface IEnemyActionDisplayString
+    {
+        string GetActionString();
     }
 }

@@ -1,29 +1,33 @@
+using System.Collections;
 using UnityEngine;
 
 namespace Match3
 {
     [System.Serializable]
-    public class IntervalAttackAction : IEnemyAction
+    public class IntervalAttackAction : IEnemyAction, IEnemyActionDisplayString
     {
-        public int AttackInterval = 3;
         public int Damage = 5;
 
-        [SerializeField]
-        private int moveCounter;
+
+        public IntervalAttackAction(int damage)
+        {
+            Damage = damage;
+        }
 
         public void OnPlayerMoved(BattleState state)
         {
-            moveCounter++;
         }
 
-        public bool TryExecute(BattleState state)
+        public IEnumerator TryExecute(BattleState state)
         {
-            if (moveCounter < AttackInterval)
-                return false;
-
-            moveCounter = 0;
             state.PlayerHealth.Hit(Damage);
-            return true;
+            Debug.Log("Attack Action");
+            yield return new WaitForSeconds(1);
+        }
+
+        public string GetActionString()
+        {
+            return $"Attack {Damage}";
         }
     }
 }

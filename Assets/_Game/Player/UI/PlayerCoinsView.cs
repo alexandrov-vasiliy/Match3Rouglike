@@ -18,7 +18,7 @@ namespace Match3
         public void SetCoins(int value)
         {
             if (textLabel != null)
-                textLabel.text = $"🪙 {value}";
+                textLabel.text = $"Money: {value}";
         }
     }
 }

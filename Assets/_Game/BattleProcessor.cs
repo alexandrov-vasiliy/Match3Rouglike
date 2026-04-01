@@ -1,3 +1,6 @@
+using System.Collections;
+using UnityEngine;
+
 namespace Match3
 {
     public enum BattleResult
@@ -22,31 +25,29 @@ namespace Match3
             effect.Apply(state, matchedCount);
         }
 
-        public void OnPlayerMoved()
+        public IEnumerator OnPlayerMoved()
         {
             state.TotalMoves++;
+            state.Energy -= 1;
 
-            foreach (var enemy in state.Enemies)
+            if (state.Energy == 0)
             {
-                if (!enemy.Health.IsAlive) continue;
-
-                foreach (var action in enemy.Actions)
-                {
-                    action.OnPlayerMoved(state);
-                }
+                GameManager.Instance.Board.ToggleInput(false);
+                yield return ProcessEnemyTurn();
+                GameManager.Instance.Board.ToggleInput(true);
+                state.Energy = state.MaxEnergy;
             }
+
+            yield return null;
         }
 
-        public void ProcessEnemyTurn()
+        public IEnumerator ProcessEnemyTurn()
         {
             foreach (var enemy in state.Enemies)
             {
                 if (!enemy.Health.IsAlive) continue;
 
-                foreach (var action in enemy.Actions)
-                {
-                    action.TryExecute(state);
-                }
+                yield return enemy.ExecuteAction(state);
             }
 
             ProcessStatusEffects();
