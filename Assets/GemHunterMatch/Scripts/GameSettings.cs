@@ -12,6 +12,9 @@ namespace Match3
     public class GameSettings
     {
         public float InactivityBeforeHint = 2.0f;
+
+        [Tooltip("Максимальное здоровье игрока в бою (глобальный баланс, не на уровень).")]
+        public int PlayerMaxHealth = 100;
     
         public VisualSetting VisualSettings;
         public BonusSetting BonusSettings;

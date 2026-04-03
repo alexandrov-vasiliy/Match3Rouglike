@@ -372,7 +372,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::Match3.Fire_Worm.FireWormEnemyDefenition
   EnemyName: Worm
-  MaxHealth: 50
+  MaxHealth: 10
 --- !u!1001 &6725421502156739414
 PrefabInstance:
   m_ObjectHideFlags: 0

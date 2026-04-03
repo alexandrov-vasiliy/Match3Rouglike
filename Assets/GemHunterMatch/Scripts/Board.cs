@@ -841,7 +841,7 @@ namespace Match3
                         // эффекты матча и скрытие гема
                         if (gem.CurrentState != Gem.State.Disappearing)
                         {
-                            LevelData.Instance.GemMatched(gem);
+                            BattleFlowCoordinator.Instance.GemMatched(gem);
                             
                             foreach (var matchEffectPrefab in gem.MatchEffectPrefabs)
                             {
@@ -855,7 +855,7 @@ namespace Match3
                     }
                     else if(gem.CurrentState != Gem.State.Disappearing)
                     {
-                        LevelData.Instance.GemMatched(gem);
+                        BattleFlowCoordinator.Instance.GemMatched(gem);
                         
                         foreach (var matchEffectPrefab in gem.MatchEffectPrefabs)
                         {
@@ -1126,7 +1126,7 @@ namespace Match3
                         m_SwapStage = SwapStage.None;
 
                         // успешный обмен — засчитываем ход уровня
-                        LevelData.Instance.PlayerMoved();
+                        BattleFlowCoordinator.Instance.PlayerMoved();
                     }
                     else
                     {
@@ -1507,7 +1507,7 @@ namespace Match3
             yield return RunReshufflePasses(forceReshuffleEvenIfMovesExist: false);
             ToggleInput(true);
             m_ReshuffleAnimationInProgress = false;
-            LevelData.Instance.OnBoardSettled();
+            BattleFlowCoordinator.Instance.OnBoardSettled();
         }
 
         IEnumerator DebugReshuffleRoutine()

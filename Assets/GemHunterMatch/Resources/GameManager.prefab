@@ -98,6 +98,7 @@ MonoBehaviour:
     m_Flags: 0
   Settings:
     InactivityBeforeHint: 8
+    PlayerMaxHealth: 100
     VisualSettings:
       FallSpeed: 10
       FallAccelerationCurve:

@@ -143,7 +143,7 @@ namespace Match3
         }
 
         /// <summary>
-        /// Called by the LevelData when it awake, notify the GameManager we started a new level.
+        /// Вызывается из BattleSceneBootstrap после инициализации первого боя на сцене.
         /// </summary>
         public void StartLevel()
         {
@@ -152,19 +152,29 @@ namespace Match3
             
             m_WinEffect.gameObject.SetActive(false);
             m_LoseEffect.gameObject.SetActive(false);
-            
-            LevelData.Instance.OnBattleWin += () => { UIHandler.Instance.ShowEnd(); };
-            LevelData.Instance.OnBattleLose += () => { UIHandler.Instance.ShowEnd(); };
 
-            if (LevelData.Instance.Music != null)
+            BattleFlowCoordinator battleFlow = BattleFlowCoordinator.Instance;
+            if (battleFlow != null)
             {
-                SwitchMusic(LevelData.Instance.Music);
+                battleFlow.OnPlayerDefeated -= HandleBattleDefeatOrRunVictory;
+                battleFlow.OnRunVictory -= HandleBattleDefeatOrRunVictory;
+                battleFlow.OnPlayerDefeated += HandleBattleDefeatOrRunVictory;
+                battleFlow.OnRunVictory += HandleBattleDefeatOrRunVictory;
             }
+
+            AudioClip levelMusic = battleFlow.GetMusicForCurrentLevel();
+            if (levelMusic != null)
+                SwitchBattleMusic(levelMusic);
 
             PoolSystem.AddNewInstance(Settings.VisualSettings.CoinVFX, 12);
 
             //we delay the board init to leave enough time for all the tile to init
             StartCoroutine(DelayedInit());
+        }
+
+        private void HandleBattleDefeatOrRunVictory()
+        {
+            UIHandler.Instance.ShowEnd();
         }
 
         IEnumerator DelayedInit()
@@ -234,7 +244,8 @@ namespace Match3
 
         public void ActivateBonusItem(BonusItem item)
         {
-            LevelData.Instance.DarkenBackground(item != null);
+            if (BattleFlowCoordinator.Instance != null)
+                BattleFlowCoordinator.Instance.DarkenBackground(item != null);
             m_BonusModePrefab?.SetActive(item != null);
             Board.ActivateBonusItem(item);
         }
@@ -273,6 +284,14 @@ namespace Match3
         {
             PlaySFX(Settings.SoundSettings.LooseVoice);
             m_LoseEffect.gameObject.SetActive(true);
+        }
+
+        public void SwitchBattleMusic(AudioClip music)
+        {
+            if (music == null)
+                return;
+
+            SwitchMusic(music);
         }
 
         void SwitchMusic(AudioClip music)

@@ -15,6 +15,7 @@ namespace Match3
 
         private Health playerHealth;
         private BattleState battleState;
+        private BattleFlowCoordinator subscribedBattleFlow;
 
         private void Awake()
         {
@@ -26,6 +27,8 @@ namespace Match3
 
         public void Init(Health health, BattleState state)
         {
+            UnsubscribeFromBattleFlow();
+
             playerHealth = health;
             battleState = state;
 
@@ -45,8 +48,17 @@ namespace Match3
                 RefreshCoins();
             }
 
-            if (LevelData.Instance != null)
-                LevelData.Instance.OnBattleStateChanged += OnBattleStateChanged;
+            subscribedBattleFlow = BattleFlowCoordinator.Instance;
+            if (subscribedBattleFlow != null)
+                subscribedBattleFlow.OnBattleStateChanged += OnBattleStateChanged;
+        }
+
+        private void UnsubscribeFromBattleFlow()
+        {
+            if (subscribedBattleFlow != null)
+                subscribedBattleFlow.OnBattleStateChanged -= OnBattleStateChanged;
+
+            subscribedBattleFlow = null;
         }
 
         private void OnDestroy()
@@ -59,8 +71,7 @@ namespace Match3
                 playerHealth.OnDied -= HandleDied;
             }
 
-            if (LevelData.Instance != null)
-                LevelData.Instance.OnBattleStateChanged -= OnBattleStateChanged;
+            UnsubscribeFromBattleFlow();
         }
 
         private void RefreshHealth(int unused)
@@ -71,7 +82,6 @@ namespace Match3
 
         private void HandleDied()
         {
-            
         }
 
         private void RefreshArmor(int armor)

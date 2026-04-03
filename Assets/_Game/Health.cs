@@ -2,7 +2,12 @@ using System;
 
 namespace Match3
 {
-    public class Health
+    public interface IDamageable
+    {
+        int Hit(int damage);
+    }
+    
+    public class Health : IDamageable
     {
         public int CurrentHealth { get; private set; }
         public int MaxHealth { get; private set; }
@@ -14,10 +19,12 @@ namespace Match3
         public event Action<int> OnArmorChanged;
         public event Action OnDied;
 
-        public Health(int maxHealth)
+        public Health(int maxHealth, int? currentHealthOverride = null)
         {
             MaxHealth = maxHealth;
-            CurrentHealth = maxHealth;
+            CurrentHealth = currentHealthOverride.HasValue
+                ? Math.Max(0, Math.Min(maxHealth, currentHealthOverride.Value))
+                : maxHealth;
             Armor = 0;
         }
 
